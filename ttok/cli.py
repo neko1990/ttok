@@ -3,6 +3,23 @@ import re
 import sys
 import tiktoken
 
+HF_MODEL_ALIASES = {
+    "gemma3": "google/gemma-3-27b-it",
+}
+
+def get_transformers_tokenizer(model_id):
+    """Get a transformers tokenizer for the given model ID."""
+    try:
+        import os
+        os.environ["TRANSFORMERS_VERBOSITY"] = "error"
+        from transformers import AutoTokenizer
+    except ImportError:
+        raise click.ClickException(
+            f"Model '{model_id}' requires the transformers library. "
+            "Install it with: pip install transformers"
+        )
+    return AutoTokenizer.from_pretrained(model_id, trust_remote_code=True)
+
 
 @click.command()
 @click.version_option()
@@ -12,6 +29,9 @@ import tiktoken
     "-t", "--truncate", "truncate", type=int, help="Truncate to this many tokens"
 )
 @click.option("-m", "--model", default="gpt-3.5-turbo", help="Which model to use")
+@click.option(
+    "-hf", "--huggingface", is_flag=True, help="Use HuggingFace AutoTokenizer"
+)
 @click.option(
     "encode_tokens", "--encode", is_flag=True, help="Output token integers"
 )
@@ -25,6 +45,7 @@ def cli(
     input,
     truncate,
     model,
+    huggingface,
     encode_tokens,
     decode_tokens,
     as_tokens,
@@ -73,10 +94,20 @@ def cli(
         )
     if as_tokens and not decode_tokens and not encode_tokens:
         encode_tokens = True
-    try:
-        encoding = tiktoken.encoding_for_model(model)
-    except KeyError as e:
-        raise click.ClickException(f"Invalid model: {model}") from e
+
+    # Check if this is a transformers model (via flag or alias)
+    use_transformers = huggingface or model in HF_MODEL_ALIASES
+
+    if use_transformers:
+        # Resolve alias to full model ID
+        model_id = HF_MODEL_ALIASES.get(model, model)
+        tokenizer = get_transformers_tokenizer(model_id)
+    else:
+        try:
+            encoding = tiktoken.encoding_for_model(model)
+        except KeyError as e:
+            raise click.ClickException(f"Invalid model: {model}") from e
+
     if not prompt and input is None:
         input = sys.stdin
     text = " ".join(prompt)
@@ -89,36 +120,52 @@ def cli(
 
     if decode_tokens:
         tokens = [int(token) for token in re.findall(r"\d+", text)]
-        if as_tokens:
-            click.echo(encoding.decode_tokens_bytes(tokens))
+        if use_transformers:
+            if as_tokens:
+                click.echo([tokenizer.decode([t]) for t in tokens])
+            else:
+                click.echo(tokenizer.decode(tokens))
         else:
-            click.echo(encoding.decode(tokens))
+            if as_tokens:
+                click.echo(encoding.decode_tokens_bytes(tokens))
+            else:
+                click.echo(encoding.decode(tokens))
         return
 
     # Tokenize it
-    kwargs = {}
-    if allow_special:
-        kwargs["allowed_special"] = "all"
-    try:
-        tokens = encoding.encode(text, **kwargs)
-    except ValueError as ex:
-        ex_str = str(ex)
-        if "disallowed special token" in ex_str and not allow_special:
-            # Just the first line, then add a hint
-            ex_str = (
-                ex_str.split("\n")[0]
-                + "\n\nUse --allow-special to allow special tokens"
-            )
-        raise click.ClickException(ex_str)
+    if use_transformers:
+        tokens = tokenizer(text)["input_ids"]
+    else:
+        kwargs = {}
+        if allow_special:
+            kwargs["allowed_special"] = "all"
+        try:
+            tokens = encoding.encode(text, **kwargs)
+        except ValueError as ex:
+            ex_str = str(ex)
+            if "disallowed special token" in ex_str and not allow_special:
+                # Just the first line, then add a hint
+                ex_str = (
+                    ex_str.split("\n")[0]
+                    + "\n\nUse --allow-special to allow special tokens"
+                )
+            raise click.ClickException(ex_str)
+
     if truncate:
         tokens = tokens[:truncate]
 
     if encode_tokens:
         if as_tokens:
-            click.echo(encoding.decode_tokens_bytes(tokens))
+            if use_transformers:
+                click.echo([tokenizer.decode([t]) for t in tokens])
+            else:
+                click.echo(encoding.decode_tokens_bytes(tokens))
         else:
             click.echo(" ".join(str(t) for t in tokens))
     elif truncate:
-        click.echo(encoding.decode(tokens), nl=False)
+        if use_transformers:
+            click.echo(tokenizer.decode(tokens), nl=False)
+        else:
+            click.echo(encoding.decode(tokens), nl=False)
     else:
         click.echo(len(tokens))

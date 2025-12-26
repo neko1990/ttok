@@ -32,6 +32,9 @@ setup(
         ttok=ttok.cli:cli
     """,
     install_requires=["click", "tiktoken"],
-    extras_require={"test": ["pytest", "cogapp"]},
+    extras_require={
+        "test": ["pytest", "cogapp"],
+        "transformers": ["transformers"],
+    },
     python_requires=">=3.8",
 )
